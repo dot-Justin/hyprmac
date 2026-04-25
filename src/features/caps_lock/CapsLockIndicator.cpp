@@ -453,11 +453,20 @@ bool CapsLockIndicator::refreshCapsState(const char* reason) {
     if (actual == s_capsActive)
         return false;
 
+    const auto previousBox = s_capsActive ? pillBoxGlobal() : std::nullopt;
+
     logDebug(
         "Caps Lock state synced to " + std::string(actual ? "ON" : "OFF") +
         " via " + reason
     );
     s_capsActive = actual;
+
+    const auto nextBox = s_capsActive ? pillBoxGlobal() : std::nullopt;
+    damageBox(previousBox);
+    damageBox(nextBox);
+    s_lastGlobalPillBox = nextBox;
+    scheduleFrameAllMonitors();
+
     return true;
 }
 
