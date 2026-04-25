@@ -24,6 +24,7 @@
 #include <fstream>
 #include <chrono>
 #include <iomanip>
+#include <sstream>
 
 // ── Static member definitions ──────────────────────────────────────────────
 
@@ -58,9 +59,21 @@ struct SCaretState {
     size_t                 directMatches  = 0;
 };
 
+struct SCaretProbeResult {
+    std::optional<SCaretState> state;
+    std::string                reason;
+    std::string                detail;
+};
+
 static std::vector<UP<STrackedTextInputV3>> s_trackedTextInputsV3;
 static uint64_t                             s_textInputActivityCounter = 0;
 static CHyprSignalListener                  s_textInputV3NewListener;
+static CHyprSignalListener                  s_mouseButtonListener;
+static std::string                          s_lastDiagnosticKey;
+static std::chrono::steady_clock::time_point s_lastDiagnosticLogAt;
+static std::chrono::steady_clock::time_point s_lastDiagnosticNotifyAt;
+static constexpr auto                       DIAGNOSTIC_LOG_INTERVAL    = std::chrono::seconds(2);
+static constexpr auto                       DIAGNOSTIC_NOTIFY_INTERVAL = std::chrono::seconds(3);
 
 static void touchTrackedInput(STrackedTextInputV3* tracked) {
     if (!tracked)
@@ -77,7 +90,7 @@ static void eraseTrackedInput(STrackedTextInputV3* tracked) {
 }
 
 static void registerTrackedInputV3(WP<CTextInputV3> weakInput);
-static std::optional<SCaretState> resolveCaretState();
+static SCaretProbeResult probeCaretState();
 
 class CCapsLockPassElement final : public IPassElement {
   public:
@@ -144,6 +157,54 @@ static void logDebug(const std::string& msg) {
     }
 }
 
+static std::string focusSummary() {
+    std::ostringstream out;
+    const auto         focusSurface = Desktop::focusState()->surface();
+    const auto         focusWindow  = Desktop::focusState()->window();
+
+    out << "focus_surface=" << (focusSurface ? "yes" : "no");
+    if (focusWindow)
+        out << " window_class=\"" << focusWindow->m_class << "\" title=\"" << focusWindow->m_title << "\"";
+
+    return out.str();
+}
+
+static void reportDiagnosticFailure(const std::string& reason, const std::string& detail) {
+    const auto now = std::chrono::steady_clock::now();
+    const auto key = reason + "|" + detail;
+
+    if (key != s_lastDiagnosticKey || now - s_lastDiagnosticLogAt >= DIAGNOSTIC_LOG_INTERVAL) {
+        logDebug("Caret unavailable [" + reason + "] " + detail);
+        s_lastDiagnosticLogAt = now;
+    }
+
+    if (key != s_lastDiagnosticKey || now - s_lastDiagnosticNotifyAt >= DIAGNOSTIC_NOTIFY_INTERVAL) {
+        HyprlandAPI::addNotification(
+            PHANDLE,
+            "[hyprmac] Caps on, no caret: " + reason,
+            CHyprColor{1.0, 0.65, 0.2, 1.0},
+            1800
+        );
+        s_lastDiagnosticNotifyAt = now;
+    }
+
+    s_lastDiagnosticKey = key;
+}
+
+static void clearDiagnosticFailure(const SCaretState& state) {
+    if (s_lastDiagnosticKey.empty())
+        return;
+
+    logDebug(
+        "Caret recovered via " +
+        std::string(state.source == ECaretSource::RELAY ? "relay" : "direct-v3") +
+        " local=(" + std::to_string(state.caretLocal.x) + "," + std::to_string(state.caretLocal.y) +
+        " " + std::to_string(state.caretLocal.w) + "x" + std::to_string(state.caretLocal.h) + ")"
+    );
+
+    s_lastDiagnosticKey.clear();
+}
+
 CHyprSignalListener CapsLockIndicator::s_renderPreListener;
 CHyprSignalListener CapsLockIndicator::s_renderStageListener;
 CHyprSignalListener CapsLockIndicator::s_configReloadedListener;
@@ -183,6 +244,9 @@ void CapsLockIndicator::init() {
     s_windowActiveListener = Event::bus()->m_events.window.active.listen(
         [](PHLWINDOW window, Desktop::eFocusReason) { onWindowActive(window); }
     );
+    s_mouseButtonListener = Event::bus()->m_events.input.mouse.button.listen(
+        [](IPointer::SButtonEvent, Event::SCallbackInfo&) { CapsLockIndicator::invalidateIndicator(); }
+    );
     if (PROTO::textInputV3) {
         for (auto& input : PROTO::textInputV3->m_textInputs) {
             registerTrackedInputV3(input);
@@ -205,9 +269,13 @@ void CapsLockIndicator::destroy() {
     s_keyboardKeyListener.reset();
     s_keyboardFocusListener.reset();
     s_windowActiveListener.reset();
+    s_mouseButtonListener.reset();
     s_textInputV3NewListener.reset();
     s_trackedTextInputsV3.clear();
     s_textInputActivityCounter = 0;
+    s_lastDiagnosticKey.clear();
+    s_lastDiagnosticLogAt = {};
+    s_lastDiagnosticNotifyAt = {};
     s_pillTexture.reset();
     s_textureDirty = true;
     s_lastGlobalPillBox.reset();
@@ -235,7 +303,7 @@ void CapsLockIndicator::onRenderStage(eRenderStage stage) {
         s_textureDirty = false;
     }
     if (!s_pillTexture) {
-        logDebug("Texture is null after build!");
+        reportDiagnosticFailure("no_texture", focusSummary());
         return;
     }
 
@@ -244,7 +312,15 @@ void CapsLockIndicator::onRenderStage(eRenderStage stage) {
         return;
 
     PHLMONITOR pillMonitor = g_pCompositor->getMonitorFromVector(globalPillBox->middle());
-    if (!pillMonitor || pillMonitor != pMonitor)
+    if (!pillMonitor) {
+        reportDiagnosticFailure(
+            "no_monitor",
+            "pill_mid=(" + std::to_string(globalPillBox->middle().x) + "," +
+                std::to_string(globalPillBox->middle().y) + ") " + focusSummary()
+        );
+        return;
+    }
+    if (pillMonitor != pMonitor)
         return;
 
     CBox pillBox = globalPillBox->copy().translate(-pMonitor->m_position);
@@ -267,7 +343,11 @@ void CapsLockIndicator::onKeyboardKey(IKeyboard::SKeyEvent ev, Event::SCallbackI
         s_capsActive = !s_capsActive;
         logDebug("Caps Lock toggled to " + std::string(s_capsActive ? "ON" : "OFF"));
         invalidateIndicator();
+        return;
     }
+
+    if (s_capsActive)
+        invalidateIndicator();
 }
 
 void CapsLockIndicator::onKeyboardFocus(SP<CWLSurfaceResource> surface) {
@@ -397,15 +477,19 @@ void CapsLockIndicator::invalidateIndicator() {
 }
 
 std::optional<CBox> CapsLockIndicator::caretBoxGlobal() {
-    const auto caretState = resolveCaretState();
-    if (!caretState.has_value())
+    const auto probe = probeCaretState();
+    if (!probe.state.has_value()) {
+        reportDiagnosticFailure(probe.reason, probe.detail);
         return std::nullopt;
+    }
+
+    clearDiagnosticFailure(*probe.state);
 
     return CBox{
-        caretState->surfaceBoxGlobal.x + caretState->caretLocal.x,
-        caretState->surfaceBoxGlobal.y + caretState->caretLocal.y,
-        std::max(1.0, caretState->caretLocal.w),
-        std::max(1.0, caretState->caretLocal.h)
+        probe.state->surfaceBoxGlobal.x + probe.state->caretLocal.x,
+        probe.state->surfaceBoxGlobal.y + probe.state->caretLocal.y,
+        std::max(1.0, probe.state->caretLocal.w),
+        std::max(1.0, probe.state->caretLocal.h)
     };
 }
 
@@ -496,29 +580,45 @@ static void registerTrackedInputV3(WP<CTextInputV3> weakInput) {
     s_trackedTextInputsV3.emplace_back(std::move(tracked));
 }
 
-static std::optional<SCaretState> resolveCaretState() {
+static SCaretProbeResult probeCaretState() {
     const auto focusSurface = Desktop::focusState()->surface();
     if (!focusSurface)
-        return std::nullopt;
+        return {
+            .reason = "no_focus_surface",
+            .detail = focusSummary() + " tracked_v3=" + std::to_string(s_trackedTextInputsV3.size()),
+        };
 
     const auto surfaceBoxGlobal = focusSurfaceBoxGlobal(focusSurface);
     if (!surfaceBoxGlobal.has_value())
-        return std::nullopt;
+        return {
+            .reason = "no_surface_box",
+            .detail = focusSummary(),
+        };
 
     auto* const relayInput = g_pInputManager->m_relay.getFocusedTextInput();
-    if (relayInput && relayInput->isEnabled() && relayInput->hasCursorRectangle() &&
-        relayInput->focusedSurface() == focusSurface) {
-        return SCaretState{
-            .source           = ECaretSource::RELAY,
-            .focusSurface     = focusSurface,
-            .surfaceBoxGlobal = *surfaceBoxGlobal,
-            .caretLocal       = relayInput->cursorBox(),
-        };
+    std::string relayStatus = "relay_missing";
+    if (relayInput) {
+        if (relayInput->focusedSurface() != focusSurface)
+            relayStatus = "relay_stale";
+        else if (!relayInput->isEnabled())
+            relayStatus = "relay_disabled";
+        else if (!relayInput->hasCursorRectangle())
+            relayStatus = "relay_no_cursor_rect";
+        else
+            return {
+                .state = SCaretState{
+                    .source           = ECaretSource::RELAY,
+                    .focusSurface     = focusSurface,
+                    .surfaceBoxGlobal = *surfaceBoxGlobal,
+                    .caretLocal       = relayInput->cursorBox(),
+                },
+            };
     }
 
     CTextInputV3* bestInput      = nullptr;
     uint64_t      bestActivity   = 0;
     size_t        directMatches  = 0;
+    size_t        updatedMatches = 0;
 
     for (auto& tracked : s_trackedTextInputsV3) {
         const auto input = tracked->input.lock();
@@ -529,6 +629,7 @@ static std::optional<SCaretState> resolveCaretState() {
 
         if (!input->m_current.box.updated)
             continue;
+        updatedMatches++;
 
         if (!bestInput || tracked->lastActivity >= bestActivity) {
             bestInput    = input.get();
@@ -537,14 +638,20 @@ static std::optional<SCaretState> resolveCaretState() {
     }
 
     if (!bestInput)
-        return std::nullopt;
+        return {
+            .reason = "no_v3_candidate",
+            .detail = relayStatus + " direct_matches=" + std::to_string(directMatches) +
+                      " updated_matches=" + std::to_string(updatedMatches) + " " + focusSummary(),
+        };
 
-    return SCaretState{
-        .source           = ECaretSource::DIRECT_V3,
-        .focusSurface     = focusSurface,
-        .surfaceBoxGlobal = *surfaceBoxGlobal,
-        .caretLocal       = bestInput->m_current.box.cursorBox,
-        .directMatches    = directMatches,
+    return {
+        .state = SCaretState{
+            .source           = ECaretSource::DIRECT_V3,
+            .focusSurface     = focusSurface,
+            .surfaceBoxGlobal = *surfaceBoxGlobal,
+            .caretLocal       = bestInput->m_current.box.cursorBox,
+            .directMatches    = directMatches,
+        },
     };
 }
 
