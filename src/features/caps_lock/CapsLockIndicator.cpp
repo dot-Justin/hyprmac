@@ -77,17 +77,24 @@ struct SCaretProbeResult {
     std::string                detail;
 };
 
+struct SCachedCaret {
+    CBox                                 caretLocal;
+    std::chrono::steady_clock::time_point seenAt;
+};
+
 static std::vector<UP<STrackedTextInputV3>> s_trackedTextInputsV3;
 static std::vector<UP<STrackedTextInputV1>> s_trackedTextInputsV1;
 static uint64_t                             s_textInputActivityCounter = 0;
 static CHyprSignalListener                  s_textInputV1NewListener;
 static CHyprSignalListener                  s_textInputV3NewListener;
 static CHyprSignalListener                  s_mouseButtonListener;
+static std::unordered_map<wl_client*, SCachedCaret> s_cachedCaretsByClient;
 static std::string                          s_lastDiagnosticKey;
 static std::chrono::steady_clock::time_point s_lastDiagnosticLogAt;
 static std::chrono::steady_clock::time_point s_lastDiagnosticNotifyAt;
 static constexpr auto                       DIAGNOSTIC_LOG_INTERVAL    = std::chrono::seconds(2);
 static constexpr auto                       DIAGNOSTIC_NOTIFY_INTERVAL = std::chrono::seconds(3);
+static constexpr auto                       CACHED_CARET_TTL           = std::chrono::seconds(2);
 
 static void touchTrackedInput(STrackedTextInputV3* tracked) {
     if (!tracked)
@@ -115,6 +122,16 @@ static void eraseTrackedInput(STrackedTextInputV1* tracked) {
         return;
 
     std::erase_if(s_trackedTextInputsV1, [tracked](const auto& other) { return other.get() == tracked; });
+}
+
+static void rememberCaret(wl_client* client, const CBox& caretLocal) {
+    if (!client)
+        return;
+
+    s_cachedCaretsByClient[client] = SCachedCaret{
+        .caretLocal = caretLocal,
+        .seenAt     = std::chrono::steady_clock::now(),
+    };
 }
 
 static void registerTrackedInputV1(WP<CTextInputV1> weakInput);
@@ -325,6 +342,7 @@ void CapsLockIndicator::destroy() {
     s_trackedTextInputsV1.clear();
     s_trackedTextInputsV3.clear();
     s_textInputActivityCounter = 0;
+    s_cachedCaretsByClient.clear();
     s_lastDiagnosticKey.clear();
     s_lastDiagnosticLogAt = {};
     s_lastDiagnosticNotifyAt = {};
@@ -536,6 +554,7 @@ std::optional<CBox> CapsLockIndicator::caretBoxGlobal() {
     }
 
     clearDiagnosticFailure(*probe.state);
+    rememberCaret(probe.state->focusSurface ? probe.state->focusSurface->client() : nullptr, probe.state->caretLocal);
 
     return CBox{
         probe.state->surfaceBoxGlobal.x + probe.state->caretLocal.x,
@@ -789,6 +808,21 @@ static SCaretProbeResult probeCaretState() {
             bestActivity = tracked->lastActivity;
         }
     }
+
+    if (!bestInput)
+        if (const auto cached = s_cachedCaretsByClient.find(focusClient);
+            cached != s_cachedCaretsByClient.end() &&
+            std::chrono::steady_clock::now() - cached->second.seenAt <= CACHED_CARET_TTL) {
+            return {
+                .state = SCaretState{
+                    .source           = ECaretSource::DIRECT_V3,
+                    .focusSurface     = focusSurface,
+                    .surfaceBoxGlobal = *surfaceBoxGlobal,
+                    .caretLocal       = cached->second.caretLocal,
+                    .directMatches    = directMatches,
+                },
+            };
+        }
 
     if (!bestInput)
         return {
