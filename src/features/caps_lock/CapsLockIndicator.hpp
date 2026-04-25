@@ -18,6 +18,7 @@ class CapsLockIndicator {
   public:
     static void init();
     static void destroy();
+    static void invalidateIndicator();
 
   private:
     static bool         s_capsActive;
@@ -44,7 +45,6 @@ class CapsLockIndicator {
     static bool isCapsLockActive();
     static void scheduleFrameAllMonitors();
     static void buildTexture();
-    static void invalidateIndicator();
     static std::optional<CBox> caretBoxGlobal();
     static std::optional<CBox> pillBoxGlobal();
     static void damageBox(const std::optional<CBox>& box);
