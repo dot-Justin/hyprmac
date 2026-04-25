@@ -43,6 +43,7 @@ class CapsLockIndicator {
     static void onConfigReloaded();
 
     static bool isCapsLockActive();
+    static bool refreshCapsState(const char* reason);
     static void scheduleFrameAllMonitors();
     static void buildTexture();
     static std::optional<CBox> caretBoxGlobal();

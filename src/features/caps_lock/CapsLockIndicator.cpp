@@ -360,6 +360,7 @@ void CapsLockIndicator::onRenderPre(const PHLMONITOR& pMonitor) {
 void CapsLockIndicator::onRenderStage(eRenderStage stage) {
     if (stage != RENDER_POST_WINDOWS)
         return;
+    refreshCapsState("render_stage");
     if (!s_capsActive)
         return;
 
@@ -408,11 +409,10 @@ void CapsLockIndicator::onKeyboardKey(IKeyboard::SKeyEvent ev, Event::SCallbackI
     const uint32_t CAPS_LOCK_KEYCODE = 58;
     (void)info;
 
-    // Check if this is Caps Lock (keycode 58) and it was pressed
     if (ev.keycode == CAPS_LOCK_KEYCODE && ev.state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-        s_capsActive = !s_capsActive;
-        logDebug("Caps Lock toggled to " + std::string(s_capsActive ? "ON" : "OFF"));
-        invalidateIndicator();
+        damageBox(s_lastGlobalPillBox);
+        s_lastGlobalPillBox.reset();
+        scheduleFrameAllMonitors();
         return;
     }
 
@@ -446,6 +446,19 @@ bool CapsLockIndicator::isCapsLockActive() {
             return true;
     }
     return false;
+}
+
+bool CapsLockIndicator::refreshCapsState(const char* reason) {
+    const bool actual = isCapsLockActive();
+    if (actual == s_capsActive)
+        return false;
+
+    logDebug(
+        "Caps Lock state synced to " + std::string(actual ? "ON" : "OFF") +
+        " via " + reason
+    );
+    s_capsActive = actual;
+    return true;
 }
 
 void CapsLockIndicator::scheduleFrameAllMonitors() {
