@@ -198,6 +198,13 @@ static std::string focusSummary() {
     return out.str();
 }
 
+template <typename T>
+static std::string ptrString(T* ptr) {
+    std::ostringstream out;
+    out << "0x" << std::hex << reinterpret_cast<uintptr_t>(ptr);
+    return out.str();
+}
+
 static void reportDiagnosticFailure(const std::string& reason, const std::string& detail) {
     const auto now = std::chrono::steady_clock::now();
     const auto key = reason + "|" + detail;
@@ -280,6 +287,7 @@ void CapsLockIndicator::init() {
         [](IPointer::SButtonEvent, Event::SCallbackInfo&) { CapsLockIndicator::invalidateIndicator(); }
     );
     if (PROTO::textInputV1) {
+        logDebug("Init: existing text-input-v1 objects=" + std::to_string(PROTO::textInputV1->m_clients.size()));
         for (auto& input : PROTO::textInputV1->m_clients) {
             registerTrackedInputV1(input);
         }
@@ -289,6 +297,7 @@ void CapsLockIndicator::init() {
         );
     }
     if (PROTO::textInputV3) {
+        logDebug("Init: existing text-input-v3 objects=" + std::to_string(PROTO::textInputV3->m_textInputs.size()));
         for (auto& input : PROTO::textInputV3->m_textInputs) {
             registerTrackedInputV3(input);
         }
@@ -625,6 +634,13 @@ static void registerTrackedInputV1(WP<CTextInputV1> weakInput) {
     if (input->m_active)
         raw->surface = Desktop::focusState()->surface();
 
+    logDebug(
+        "Tracked text-input-v1 client=" + ptrString(input->client()) +
+        " active=" + std::string(input->m_active ? "yes" : "no") +
+        " cursor=(" + std::to_string(input->m_cursorRectangle.x) + "," + std::to_string(input->m_cursorRectangle.y) +
+        " " + std::to_string(input->m_cursorRectangle.w) + "x" + std::to_string(input->m_cursorRectangle.h) + ")"
+    );
+
     s_trackedTextInputsV1.emplace_back(std::move(tracked));
 }
 
@@ -660,6 +676,14 @@ static void registerTrackedInputV3(WP<CTextInputV3> weakInput) {
         eraseTrackedInput(raw);
     });
 
+    logDebug(
+        "Tracked text-input-v3 client=" + ptrString(input->client()) +
+        " enabled=" + std::string(input->m_current.enabled.value ? "yes" : "no") +
+        " updated=" + std::string(input->m_current.box.updated ? "yes" : "no") +
+        " cursor=(" + std::to_string(input->m_current.box.cursorBox.x) + "," + std::to_string(input->m_current.box.cursorBox.y) +
+        " " + std::to_string(input->m_current.box.cursorBox.w) + "x" + std::to_string(input->m_current.box.cursorBox.h) + ")"
+    );
+
     s_trackedTextInputsV3.emplace_back(std::move(tracked));
 }
 
@@ -680,6 +704,7 @@ static SCaretProbeResult probeCaretState() {
         };
 
     auto* const relayInput = g_pInputManager->m_relay.getFocusedTextInput();
+    const auto  focusClient = focusSurface->client();
     std::string relayStatus = "relay_missing";
     if (relayInput) {
         if (relayInput->focusedSurface() != focusSurface)
@@ -760,6 +785,9 @@ static SCaretProbeResult probeCaretState() {
         return {
             .reason = "no_v3_candidate",
             .detail = relayStatus +
+                      " focus_client=" + ptrString(focusClient) +
+                      " tracked_v1=" + std::to_string(s_trackedTextInputsV1.size()) +
+                      " tracked_v3=" + std::to_string(s_trackedTextInputsV3.size()) +
                       " v1_matches=" + std::to_string(directMatchesV1) +
                       " v1_rect_matches=" + std::to_string(rectMatchesV1) +
                       " v3_matches=" + std::to_string(directMatches) +
