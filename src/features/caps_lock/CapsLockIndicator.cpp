@@ -14,6 +14,9 @@
 #include <cmath>
 #include <unordered_map>
 #include <string>
+#include <fstream>
+#include <chrono>
+#include <iomanip>
 
 // ── Static member definitions ──────────────────────────────────────────────
 
@@ -21,17 +24,39 @@ bool         CapsLockIndicator::s_capsActive    = false;
 bool         CapsLockIndicator::s_textureDirty  = true;
 SP<CTexture> CapsLockIndicator::s_pillTexture;
 PHLMONITOR   CapsLockIndicator::s_currentMonitor;
+static bool  s_renderDebugShown = false;  // one-time debug flag
 
-CHyprSignalListener              CapsLockIndicator::s_renderPreListener;
-CHyprSignalListener              CapsLockIndicator::s_renderStageListener;
-CHyprSignalListener              CapsLockIndicator::s_configReloadedListener;
-std::vector<CHyprSignalListener> CapsLockIndicator::s_kbModListeners;
+// ── Logging ─────────────────────────────────────────────────────────────────
+
+static void logDebug(const std::string& msg) {
+    auto now = std::chrono::system_clock::now();
+    auto time = std::chrono::system_clock::to_time_t(now);
+    std::ofstream log("/tmp/hyprmac_debug.log", std::ios::app);
+    if (log.is_open()) {
+        log << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S") << " - " << msg << std::endl;
+    }
+}
+
+CHyprSignalListener CapsLockIndicator::s_renderPreListener;
+CHyprSignalListener CapsLockIndicator::s_renderStageListener;
+CHyprSignalListener CapsLockIndicator::s_configReloadedListener;
+CHyprSignalListener CapsLockIndicator::s_keyboardKeyListener;
 
 // ── Public ─────────────────────────────────────────────────────────────────
 
 void CapsLockIndicator::init() {
+    // Clear log file
+    std::ofstream("/tmp/hyprmac_debug.log", std::ios::trunc).close();
+    logDebug("=== hyprmac init ===");
+
     s_capsActive   = isCapsLockActive();
     s_textureDirty = true;
+
+    logDebug("Initial Caps Lock state: " + std::string(s_capsActive ? "ON" : "OFF"));
+
+    HyprlandAPI::addNotification(PHANDLE,
+        "[hyprmac] init: Caps Lock active = " + std::string(s_capsActive ? "YES" : "NO"),
+        CHyprColor{0.2, 0.8, 0.2, 1.0}, 3000);
 
     s_renderPreListener = Event::bus()->m_events.render.pre.listen(
         [](const PHLMONITOR& pMonitor) { onRenderPre(pMonitor); }
@@ -43,24 +68,18 @@ void CapsLockIndicator::init() {
         []() { onConfigReloaded(); }
     );
 
-    // Caps Lock is a *locked* modifier in XKB. getModifiers() only returns
-    // depressed+latched, so we must hook each keyboard's modifiers signal,
-    // which fires after XKB has updated m_modifiersState.locked.
-    for (auto& kb : g_pInputManager->m_keyboards) {
-        if (!kb) continue;
-        s_kbModListeners.push_back(
-            kb->m_keyboardEvents.modifiers.listen(
-                [](const IKeyboard::SModifiersEvent& ev) { onKeyboardModifiers(ev); }
-            )
-        );
-    }
+    // Use global keyboard.key event to detect Caps Lock toggles
+    // Note: updateMods is NOT set for Caps Lock, so we check keycode directly
+    s_keyboardKeyListener = Event::bus()->m_events.input.keyboard.key.listen(
+        [](IKeyboard::SKeyEvent ev, Event::SCallbackInfo& info) { onKeyboardKey(ev, info); }
+    );
 }
 
 void CapsLockIndicator::destroy() {
     s_renderPreListener.reset();
     s_renderStageListener.reset();
     s_configReloadedListener.reset();
-    s_kbModListeners.clear();
+    s_keyboardKeyListener.reset();
     s_pillTexture.reset();
     s_textureDirty = true;
 }
@@ -77,17 +96,29 @@ void CapsLockIndicator::onRenderStage(eRenderStage stage) {
     if (!s_capsActive)
         return;
 
+    // One-time debug: show that render stage is being called
+    if (!s_renderDebugShown) {
+        s_renderDebugShown = true;
+        logDebug("Render stage called with Caps Lock active");
+        HyprlandAPI::addNotification(PHANDLE,
+            "[hyprmac] render stage called with Caps Lock active",
+            CHyprColor{0.2, 0.8, 0.2, 1.0}, 2000);
+    }
+
     PHLMONITOR pMonitor = s_currentMonitor;
     if (!pMonitor)
         return;
 
     // Build (or rebuild) the pill texture while the GL context is active
     if (s_textureDirty) {
+        logDebug("Building texture...");
         buildTexture();
         s_textureDirty = false;
     }
-    if (!s_pillTexture)
+    if (!s_pillTexture) {
+        logDebug("Texture is null after build!");
         return;
+    }
 
     const int size    = configInt("plugin:hyprmac:caps_lock_size");
     const int offsetY = configInt("plugin:hyprmac:caps_lock_offset_y");
@@ -111,20 +142,34 @@ void CapsLockIndicator::onRenderStage(eRenderStage stage) {
         (double)size
     };
 
+    logDebug("Rendering pill at (" + std::to_string(local.x) + ", " + std::to_string(local.y) + ")");
+
     CHyprOpenGLImpl::STextureRenderData rd{};
     rd.a = 1.0f;
     g_pHyprOpenGL->renderTexture(s_pillTexture, pillBox, rd);
 }
 
-void CapsLockIndicator::onKeyboardModifiers(const IKeyboard::SModifiersEvent& ev) {
-    // Caps Lock lives in the *locked* modifier layer. This signal fires after
-    // XKB has updated m_modifiersState, so ev.locked reflects the new state.
-    bool newState = (ev.locked & HL_MODIFIER_CAPS) != 0;
-    if (newState == s_capsActive)
-        return;
+void CapsLockIndicator::onKeyboardKey(IKeyboard::SKeyEvent ev, Event::SCallbackInfo& info) {
+    // Caps Lock keycode is typically 58 in XKB
+    const uint32_t CAPS_LOCK_KEYCODE = 58;
 
-    s_capsActive = newState;
-    scheduleFrameAllMonitors();
+    logDebug("key event: keycode=" + std::to_string(ev.keycode) +
+             ", state=" + std::to_string(ev.state) +
+             ", updateMods=" + std::string(ev.updateMods ? "YES" : "NO"));
+
+    // Check if this is Caps Lock (keycode 58) and it was pressed
+    if (ev.keycode == CAPS_LOCK_KEYCODE && ev.state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        logDebug("Caps Lock key pressed, toggling state...");
+
+        // Toggle the state ourselves since XKB state isn't updated yet
+        s_capsActive = !s_capsActive;
+        logDebug("Caps Lock toggled to " + std::string(s_capsActive ? "ON" : "OFF"));
+
+        HyprlandAPI::addNotification(PHANDLE,
+            "[hyprmac] Caps Lock toggled to " + std::string(s_capsActive ? "ON" : "OFF"),
+            CHyprColor{0.2, 0.8, 0.2, 1.0}, 2000);
+        scheduleFrameAllMonitors();
+    }
 }
 
 void CapsLockIndicator::onConfigReloaded() {

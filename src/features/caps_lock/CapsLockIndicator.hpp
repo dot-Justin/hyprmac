@@ -24,16 +24,14 @@ class CapsLockIndicator {
     static PHLMONITOR   s_currentMonitor;
 
     // Listener handles — must stay alive to keep callbacks registered
-    static CHyprSignalListener              s_renderPreListener;
-    static CHyprSignalListener              s_renderStageListener;
-    static CHyprSignalListener              s_configReloadedListener;
-    // One modifier listener per keyboard (Caps Lock is a locked modifier — only
-    // m_keyboardEvents.modifiers fires AFTER XKB has updated locked state)
-    static std::vector<CHyprSignalListener> s_kbModListeners;
+    static CHyprSignalListener s_renderPreListener;
+    static CHyprSignalListener s_renderStageListener;
+    static CHyprSignalListener s_configReloadedListener;
+    static CHyprSignalListener s_keyboardKeyListener;
 
     static void onRenderPre(const PHLMONITOR& pMonitor);
     static void onRenderStage(eRenderStage stage);
-    static void onKeyboardModifiers(const IKeyboard::SModifiersEvent& ev);
+    static void onKeyboardKey(IKeyboard::SKeyEvent ev, Event::SCallbackInfo& info);
     static void onConfigReloaded();
 
     static bool isCapsLockActive();
