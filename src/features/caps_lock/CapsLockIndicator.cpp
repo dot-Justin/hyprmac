@@ -22,6 +22,7 @@
 
 bool         CapsLockIndicator::s_capsActive    = false;
 bool         CapsLockIndicator::s_textureDirty  = true;
+int          CapsLockIndicator::s_lastPhysSize  = 0;
 SP<CTexture> CapsLockIndicator::s_pillTexture;
 PHLMONITOR   CapsLockIndicator::s_currentMonitor;
 static bool  s_renderDebugShown = false;  // one-time debug flag
@@ -109,19 +110,22 @@ void CapsLockIndicator::onRenderStage(eRenderStage stage) {
     if (!pMonitor)
         return;
 
-    // Build (or rebuild) the pill texture while the GL context is active
-    if (s_textureDirty) {
-        logDebug("Building texture...");
-        buildTexture();
+    const int    size     = configInt("plugin:hyprmac:caps_lock_size");
+    const int    offsetY  = configInt("plugin:hyprmac:caps_lock_offset_y");
+    const double scale    = pMonitor->m_scale;
+    const int    physSize = (int)std::round(size * scale);
+
+    // Build (or rebuild) the pill texture at physical pixel size while GL context is active
+    if (s_textureDirty || s_lastPhysSize != physSize) {
+        logDebug("Building texture at physSize=" + std::to_string(physSize));
+        buildTexture(physSize);
+        s_lastPhysSize = physSize;
         s_textureDirty = false;
     }
     if (!s_pillTexture) {
         logDebug("Texture is null after build!");
         return;
     }
-
-    const int size    = configInt("plugin:hyprmac:caps_lock_size");
-    const int offsetY = configInt("plugin:hyprmac:caps_lock_offset_y");
 
     Vector2D cursorGlobal = g_pPointerManager->position();
 
@@ -131,18 +135,18 @@ void CapsLockIndicator::onRenderStage(eRenderStage stage) {
     if (!monBox.containsPoint(cursorGlobal))
         return;
 
-    // Transform global → monitor-local logical coordinates
+    // Transform global → monitor-local logical coordinates, then scale to physical pixels
+    // renderTexture expects physical (scaled) pixel coordinates
     Vector2D local = cursorGlobal - pMonitor->m_position;
 
-    // Badge: centered on cursor X, top edge = cursor tip + offsetY
     CBox pillBox{
-        local.x - size / 2.0,
-        local.y + (double)offsetY,
-        (double)size,
-        (double)size
+        (local.x - size / 2.0) * scale,
+        (local.y + (double)offsetY) * scale,
+        (double)physSize,
+        (double)physSize
     };
 
-    logDebug("Rendering pill at (" + std::to_string(local.x) + ", " + std::to_string(local.y) + ")");
+    logDebug("Rendering pill at (" + std::to_string(pillBox.x) + ", " + std::to_string(pillBox.y) + ") physSize=" + std::to_string(physSize));
 
     CHyprOpenGLImpl::STextureRenderData rd{};
     rd.a = 1.0f;
@@ -202,8 +206,8 @@ void CapsLockIndicator::scheduleFrameAllMonitors() {
 
 // ── Cairo texture rendering ────────────────────────────────────────────────
 
-void CapsLockIndicator::buildTexture() {
-    const int     size     = configInt("plugin:hyprmac:caps_lock_size");
+void CapsLockIndicator::buildTexture(int physSize) {
+    const int     size     = physSize;
     const int64_t colorRaw = (int64_t)configInt("plugin:hyprmac:caps_lock_color");
 
     // Decode rgba(RRGGBBAA) packed int → normalised RGBA

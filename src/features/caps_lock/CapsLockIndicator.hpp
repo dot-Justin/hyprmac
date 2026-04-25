@@ -20,6 +20,7 @@ class CapsLockIndicator {
   private:
     static bool         s_capsActive;
     static bool         s_textureDirty;
+    static int          s_lastPhysSize;
     static SP<CTexture> s_pillTexture;
     static PHLMONITOR   s_currentMonitor;
 
@@ -36,6 +37,6 @@ class CapsLockIndicator {
 
     static bool isCapsLockActive();
     static void scheduleFrameAllMonitors();
-    static void buildTexture();
+    static void buildTexture(int physSize);
     static int  configInt(const std::string& key);
 };
