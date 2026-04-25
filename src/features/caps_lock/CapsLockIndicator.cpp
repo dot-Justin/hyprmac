@@ -3,7 +3,8 @@
 
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
-#include <hyprland/src/managers/PointerManager.hpp>
+#include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/render/pass/PassElement.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/helpers/Monitor.hpp>
 #include <hyprland/src/helpers/math/Math.hpp>
@@ -21,11 +22,97 @@
 // ── Static member definitions ──────────────────────────────────────────────
 
 bool         CapsLockIndicator::s_capsActive    = false;
-bool         CapsLockIndicator::s_textureDirty  = true;
-int          CapsLockIndicator::s_lastPhysSize  = 0;
-SP<CTexture> CapsLockIndicator::s_pillTexture;
+bool         CapsLockIndicator::s_textureDirty  = false;
+SP<CTexture> CapsLockIndicator::s_pillTexture   = nullptr;
 PHLMONITOR   CapsLockIndicator::s_currentMonitor;
+std::optional<CBox> CapsLockIndicator::s_lastGlobalPillBox;
 static bool  s_renderDebugShown = false;  // one-time debug flag
+
+namespace {
+
+class CCapsLockPassElement final : public IPassElement {
+  public:
+    struct SData {
+        PHLMONITORREF monitor;
+        CBox box;
+        CHyprColor bgColor;
+    };
+
+    explicit CCapsLockPassElement(SData&& data) : m_data(std::move(data)) {
+    }
+
+    void draw(const CRegion& damage) override {
+        (void)damage;
+
+        const auto renderMonitor = g_pHyprOpenGL->m_renderData.pMonitor.lock();
+        const auto expectedMonitor = m_data.monitor.lock();
+        if (!renderMonitor || !expectedMonitor || renderMonitor != expectedMonitor)
+            return;
+
+        const double size = m_data.box.w;
+        const double centerX = m_data.box.x + size / 2.0;
+        const int glyphRound = std::max(2, (int)std::round(size * 0.06));
+
+        g_pHyprOpenGL->renderRect(
+            m_data.box,
+            m_data.bgColor,
+            {.round = std::max(4, (int)std::round(size * 0.28))}
+        );
+
+        CBox stem{
+            centerX - size * 0.07,
+            m_data.box.y + size * 0.24,
+            size * 0.14,
+            size * 0.30
+        };
+        g_pHyprOpenGL->renderRect(stem, CHyprColor{1.0, 1.0, 1.0, 0.94}, {.round = glyphRound});
+
+        CBox cap{
+            centerX - size * 0.20,
+            m_data.box.y + size * 0.16,
+            size * 0.40,
+            size * 0.12
+        };
+        g_pHyprOpenGL->renderRect(cap, CHyprColor{1.0, 1.0, 1.0, 0.94}, {.round = glyphRound});
+
+        CBox bar{
+            centerX - size * 0.24,
+            m_data.box.y + size * 0.70,
+            size * 0.48,
+            size * 0.10
+        };
+        g_pHyprOpenGL->renderRect(bar, CHyprColor{1.0, 1.0, 1.0, 0.94}, {.round = glyphRound});
+    }
+
+    bool needsLiveBlur() override {
+        return false;
+    }
+
+    bool needsPrecomputeBlur() override {
+        return false;
+    }
+
+    bool undiscardable() override {
+        return true;
+    }
+
+    std::optional<CBox> boundingBox() override {
+        return m_data.box.copy().expand(4.0);
+    }
+
+    CRegion opaqueRegion() override {
+        return {};
+    }
+
+    const char* passName() override {
+        return "CCapsLockPassElement";
+    }
+
+  private:
+    SData m_data;
+};
+
+} // namespace
 
 // ── Logging ─────────────────────────────────────────────────────────────────
 
@@ -42,6 +129,8 @@ CHyprSignalListener CapsLockIndicator::s_renderPreListener;
 CHyprSignalListener CapsLockIndicator::s_renderStageListener;
 CHyprSignalListener CapsLockIndicator::s_configReloadedListener;
 CHyprSignalListener CapsLockIndicator::s_keyboardKeyListener;
+CHyprSignalListener CapsLockIndicator::s_keyboardFocusListener;
+CHyprSignalListener CapsLockIndicator::s_windowActiveListener;
 
 // ── Public ─────────────────────────────────────────────────────────────────
 
@@ -51,13 +140,10 @@ void CapsLockIndicator::init() {
     logDebug("=== hyprmac init ===");
 
     s_capsActive   = isCapsLockActive();
-    s_textureDirty = true;
+    s_textureDirty = false;
+    s_lastGlobalPillBox.reset();
 
     logDebug("Initial Caps Lock state: " + std::string(s_capsActive ? "ON" : "OFF"));
-
-    HyprlandAPI::addNotification(PHANDLE,
-        "[hyprmac] init: Caps Lock active = " + std::string(s_capsActive ? "YES" : "NO"),
-        CHyprColor{0.2, 0.8, 0.2, 1.0}, 3000);
 
     s_renderPreListener = Event::bus()->m_events.render.pre.listen(
         [](const PHLMONITOR& pMonitor) { onRenderPre(pMonitor); }
@@ -69,11 +155,19 @@ void CapsLockIndicator::init() {
         []() { onConfigReloaded(); }
     );
 
-    // Use global keyboard.key event to detect Caps Lock toggles
-    // Note: updateMods is NOT set for Caps Lock, so we check keycode directly
     s_keyboardKeyListener = Event::bus()->m_events.input.keyboard.key.listen(
         [](IKeyboard::SKeyEvent ev, Event::SCallbackInfo& info) { onKeyboardKey(ev, info); }
     );
+    s_keyboardFocusListener = Event::bus()->m_events.input.keyboard.focus.listen(
+        [](SP<CWLSurfaceResource> surface) { onKeyboardFocus(surface); }
+    );
+    s_windowActiveListener = Event::bus()->m_events.window.active.listen(
+        [](PHLWINDOW window, Desktop::eFocusReason) { onWindowActive(window); }
+    );
+
+    if (s_capsActive) {
+        invalidateIndicator();
+    }
 }
 
 void CapsLockIndicator::destroy() {
@@ -81,8 +175,11 @@ void CapsLockIndicator::destroy() {
     s_renderStageListener.reset();
     s_configReloadedListener.reset();
     s_keyboardKeyListener.reset();
+    s_keyboardFocusListener.reset();
+    s_windowActiveListener.reset();
     s_pillTexture.reset();
-    s_textureDirty = true;
+    s_textureDirty = false;
+    s_lastGlobalPillBox.reset();
 }
 
 // ── Event handlers ─────────────────────────────────────────────────────────
@@ -92,7 +189,7 @@ void CapsLockIndicator::onRenderPre(const PHLMONITOR& pMonitor) {
 }
 
 void CapsLockIndicator::onRenderStage(eRenderStage stage) {
-    if (stage != RENDER_LAST_MOMENT)
+    if (stage != RENDER_POST_WINDOWS)
         return;
     if (!s_capsActive)
         return;
@@ -101,61 +198,42 @@ void CapsLockIndicator::onRenderStage(eRenderStage stage) {
     if (!s_renderDebugShown) {
         s_renderDebugShown = true;
         logDebug("Render stage called with Caps Lock active");
-        HyprlandAPI::addNotification(PHANDLE,
-            "[hyprmac] render stage called with Caps Lock active",
-            CHyprColor{0.2, 0.8, 0.2, 1.0}, 2000);
     }
 
     PHLMONITOR pMonitor = s_currentMonitor;
     if (!pMonitor)
         return;
 
-    const int    size     = configInt("plugin:hyprmac:caps_lock_size");
-    const int    offsetY  = configInt("plugin:hyprmac:caps_lock_offset_y");
-    const double scale    = pMonitor->m_scale;
-    const int    physSize = (int)std::round(size * scale);
-
-    // Build (or rebuild) the pill texture at physical pixel size while GL context is active
-    if (s_textureDirty || s_lastPhysSize != physSize) {
-        logDebug("Building texture at physSize=" + std::to_string(physSize));
-        buildTexture(physSize);
-        s_lastPhysSize = physSize;
-        s_textureDirty = false;
-    }
-    if (!s_pillTexture) {
-        logDebug("Texture is null after build!");
-        return;
-    }
-
-    Vector2D cursorGlobal = g_pPointerManager->position();
-
-    // Only draw on the monitor containing the cursor
-    CBox monBox{pMonitor->m_position.x, pMonitor->m_position.y,
-                pMonitor->m_size.x,     pMonitor->m_size.y};
-    if (!monBox.containsPoint(cursorGlobal))
+    const auto globalPillBox = pillBoxGlobal();
+    if (!globalPillBox.has_value())
         return;
 
-    // Transform global → monitor-local logical coordinates, then scale to physical pixels
-    // renderTexture expects physical (scaled) pixel coordinates
-    Vector2D local = cursorGlobal - pMonitor->m_position;
+    PHLMONITOR pillMonitor = g_pCompositor->getMonitorFromVector(globalPillBox->middle());
+    if (!pillMonitor || pillMonitor != pMonitor)
+        return;
 
-    CBox pillBox{
-        (local.x - size / 2.0) * scale,
-        (local.y + (double)offsetY) * scale,
-        (double)physSize,
-        (double)physSize
+    CBox pillBox = globalPillBox->copy().translate(-pMonitor->m_position);
+    s_lastGlobalPillBox = globalPillBox;
+
+    logDebug("Queueing pill pass at logical (" + std::to_string(pillBox.x) + ", " + std::to_string(pillBox.y) + ")");
+
+    CCapsLockPassElement::SData data;
+    data.monitor = pMonitor;
+    data.box = pillBox;
+    const int64_t colorRaw = (int64_t)configInt("plugin:hyprmac:caps_lock_color");
+    data.bgColor = CHyprColor{
+        (float)(((colorRaw >> 24) & 0xFF) / 255.0),
+        (float)(((colorRaw >> 16) & 0xFF) / 255.0),
+        (float)(((colorRaw >>  8) & 0xFF) / 255.0),
+        (float)(((colorRaw >>  0) & 0xFF) / 255.0)
     };
 
-    logDebug("Rendering pill at (" + std::to_string(pillBox.x) + ", " + std::to_string(pillBox.y) + ") physSize=" + std::to_string(physSize));
-
-    CHyprOpenGLImpl::STextureRenderData rd{};
-    rd.a = 1.0f;
-    g_pHyprOpenGL->renderTexture(s_pillTexture, pillBox, rd);
+    g_pHyprRenderer->m_renderPass.add(makeUnique<CCapsLockPassElement>(std::move(data)));
 }
 
 void CapsLockIndicator::onKeyboardKey(IKeyboard::SKeyEvent ev, Event::SCallbackInfo& info) {
-    // Caps Lock keycode is typically 58 in XKB
     const uint32_t CAPS_LOCK_KEYCODE = 58;
+    (void)info;
 
     logDebug("key event: keycode=" + std::to_string(ev.keycode) +
              ", state=" + std::to_string(ev.state) +
@@ -165,21 +243,26 @@ void CapsLockIndicator::onKeyboardKey(IKeyboard::SKeyEvent ev, Event::SCallbackI
     if (ev.keycode == CAPS_LOCK_KEYCODE && ev.state == WL_KEYBOARD_KEY_STATE_PRESSED) {
         logDebug("Caps Lock key pressed, toggling state...");
 
-        // Toggle the state ourselves since XKB state isn't updated yet
         s_capsActive = !s_capsActive;
         logDebug("Caps Lock toggled to " + std::string(s_capsActive ? "ON" : "OFF"));
-
-        HyprlandAPI::addNotification(PHANDLE,
-            "[hyprmac] Caps Lock toggled to " + std::string(s_capsActive ? "ON" : "OFF"),
-            CHyprColor{0.2, 0.8, 0.2, 1.0}, 2000);
-        scheduleFrameAllMonitors();
+        invalidateIndicator();
     }
 }
 
+void CapsLockIndicator::onKeyboardFocus(SP<CWLSurfaceResource> surface) {
+    (void)surface;
+    invalidateIndicator();
+}
+
+void CapsLockIndicator::onWindowActive(PHLWINDOW window) {
+    (void)window;
+    invalidateIndicator();
+}
+
 void CapsLockIndicator::onConfigReloaded() {
-    s_textureDirty = true;
+    s_textureDirty = false;
     s_pillTexture.reset();
-    // Texture will be rebuilt on the next RENDER_LAST_MOMENT
+    invalidateIndicator();
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -206,8 +289,8 @@ void CapsLockIndicator::scheduleFrameAllMonitors() {
 
 // ── Cairo texture rendering ────────────────────────────────────────────────
 
-void CapsLockIndicator::buildTexture(int physSize) {
-    const int     size     = physSize;
+void CapsLockIndicator::buildTexture() {
+    const int     size     = configInt("plugin:hyprmac:caps_lock_size");
     const int64_t colorRaw = (int64_t)configInt("plugin:hyprmac:caps_lock_color");
 
     // Decode rgba(RRGGBBAA) packed int → normalised RGBA
@@ -282,6 +365,67 @@ void CapsLockIndicator::buildTexture(int physSize) {
 
     cairo_destroy(cr);
     cairo_surface_destroy(surface);
+}
+
+void CapsLockIndicator::invalidateIndicator() {
+    const auto nextBox = s_capsActive ? pillBoxGlobal() : std::nullopt;
+    damageBox(s_lastGlobalPillBox);
+    damageBox(nextBox);
+    s_lastGlobalPillBox = nextBox;
+    scheduleFrameAllMonitors();
+}
+
+std::optional<CBox> CapsLockIndicator::caretBoxGlobal() {
+    auto* const focusedTextInput = g_pInputManager->m_relay.getFocusedTextInput();
+    if (!focusedTextInput || !focusedTextInput->isEnabled() || !focusedTextInput->hasCursorRectangle())
+        return std::nullopt;
+
+    const auto focusedSurface = focusedTextInput->focusedSurface();
+    if (!focusedSurface)
+        return std::nullopt;
+
+    const auto hlSurface = focusedSurface->m_hlSurface.lock();
+    if (!hlSurface)
+        return std::nullopt;
+
+    const auto surfaceBoxGlobal = hlSurface->getSurfaceBoxGlobal();
+    if (!surfaceBoxGlobal.has_value())
+        return std::nullopt;
+
+    const auto caretLocal = focusedTextInput->cursorBox();
+    return CBox{
+        surfaceBoxGlobal->x + caretLocal.x,
+        surfaceBoxGlobal->y + caretLocal.y,
+        std::max(1.0, caretLocal.w),
+        std::max(1.0, caretLocal.h)
+    };
+}
+
+std::optional<CBox> CapsLockIndicator::pillBoxGlobal() {
+    const auto caret = caretBoxGlobal();
+    if (!caret.has_value())
+        return std::nullopt;
+
+    const int size    = configInt("plugin:hyprmac:caps_lock_size");
+    const int offsetY = configInt("plugin:hyprmac:caps_lock_offset_y");
+    const double centerX = caret->x + caret->w / 2.0;
+    const double badgeX  = std::round(centerX - size / 2.0);
+    const double badgeY  = std::round(caret->y + caret->h + (double)offsetY);
+
+    return CBox{
+        badgeX,
+        badgeY,
+        (double)size,
+        (double)size
+    };
+}
+
+void CapsLockIndicator::damageBox(const std::optional<CBox>& box) {
+    if (!box.has_value())
+        return;
+
+    logDebug("Damaging global pill box at (" + std::to_string(box->x) + ", " + std::to_string(box->y) + ")");
+    g_pHyprRenderer->damageBox(box->copy().expand(4.0));
 }
 
 int CapsLockIndicator::configInt(const std::string& key) {
