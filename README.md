@@ -9,7 +9,7 @@ hyprmac is a Hyprland compositor plugin that brings the polished micro-interacti
 ## Current features
 
 ### Caps Lock indicator
-A small squircle badge appears just below your cursor tip whenever Caps Lock is active. Follows the cursor in real time, disappears instantly when you toggle Caps Lock off. Never miss a silent typo again.
+A small squircle badge appears just below the focused text caret whenever Caps Lock is active. It is rendered directly by Hyprland during the compositor render pass, not by a client window or bar widget.
 
 ![Caps Lock indicator — blue squircle badge below cursor with upward arrow icon](.github/screenshot.png)
 
@@ -89,6 +89,8 @@ plugin:hyprmac {
 Changes take effect immediately after `hyprctl reload` — no restart required.
 
 The Caps Lock badge follows native Wayland text carets exposed through Hyprland's text-input state. Apps that do not provide a valid caret rectangle, including many XWayland cases, will hide the badge instead of guessing. Debug logs are written to `/tmp/hyprmac_debug.log`.
+
+Implementation notes and protocol caveats live in [docs/caps-lock-indicator.md](docs/caps-lock-indicator.md).
 
 ---
 
