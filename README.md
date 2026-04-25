@@ -74,7 +74,7 @@ Add a `plugin:hyprmac` block to your `~/.config/hypr/hyprland.conf`:
 plugin:hyprmac {
     caps_lock_color    = rgba(3B82F6ff)  # badge fill color (default: Tailwind blue-500)
     caps_lock_size     = 40              # badge diameter in logical pixels
-    caps_lock_offset_y = 8              # pixels below cursor hotspot
+    caps_lock_offset_y = 8               # pixels below the text caret
 }
 ```
 
@@ -84,9 +84,11 @@ plugin:hyprmac {
 |-----|------|---------|-------------|
 | `caps_lock_color` | `rgba(RRGGBBAA)` | `rgba(3B82F6ff)` | Badge fill color |
 | `caps_lock_size` | integer (px) | `40` | Badge diameter in logical pixels |
-| `caps_lock_offset_y` | integer (px) | `8` | Vertical offset from cursor tip to badge top |
+| `caps_lock_offset_y` | integer (px) | `8` | Vertical offset from the text caret to the badge top |
 
 Changes take effect immediately after `hyprctl reload` — no restart required.
+
+The Caps Lock badge follows native Wayland text carets exposed through Hyprland's text-input state. Apps that do not provide a valid caret rectangle, including many XWayland cases, will hide the badge instead of guessing. Debug logs are written to `/tmp/hyprmac_debug.log`.
 
 ---
 
