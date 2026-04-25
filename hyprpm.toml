@@ -1,0 +1,17 @@
+[repository]
+name = "hyprmac"
+authors = ["Justin"]
+commit_pins = [
+    # [hyprland_commit, plugin_commit]
+    # Hyprland v0.54.3 — tested compatible
+    ["521ece463c4a9d3d128670688a34756805a4328f", "b52669c27b010151d7b935bd8aec3438c721fa45"],
+]
+
+[hyprmac]
+description = "macOS-like interactions for Hyprland — Caps Lock cursor indicator and more"
+authors = ["Justin"]
+output = "build/libhyprmac.so"
+build = [
+    "cmake -B build -DCMAKE_BUILD_TYPE=Release",
+    "cmake --build build"
+]
