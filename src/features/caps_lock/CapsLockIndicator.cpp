@@ -26,6 +26,7 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <iterator>
 
 // ── Static member definitions ──────────────────────────────────────────────
 
@@ -203,14 +204,59 @@ static void logDebug(const std::string& msg) {
     }
 }
 
+static std::string readProcCmdline(pid_t pid) {
+    if (pid <= 0)
+        return {};
+
+    std::ifstream cmdline("/proc/" + std::to_string(pid) + "/cmdline", std::ios::binary);
+    if (!cmdline.is_open())
+        return {};
+
+    std::string raw((std::istreambuf_iterator<char>(cmdline)), std::istreambuf_iterator<char>());
+    for (char& ch : raw) {
+        if (ch == '\0')
+            ch = ' ';
+    }
+
+    while (!raw.empty() && raw.back() == ' ')
+        raw.pop_back();
+
+    return raw;
+}
+
+static bool hasCmdlineFlag(const std::string& cmdline, const std::string& flag) {
+    return !cmdline.empty() && cmdline.find(flag) != std::string::npos;
+}
+
+static bool isChromiumLikeCommand(const std::string& cmdline) {
+    if (cmdline.empty())
+        return false;
+
+    return cmdline.find("chrome") != std::string::npos ||
+        cmdline.find("chromium") != std::string::npos ||
+        cmdline.find("electron") != std::string::npos ||
+        cmdline.find("vesktop") != std::string::npos ||
+        cmdline.find("helium") != std::string::npos;
+}
+
 static std::string focusSummary() {
     std::ostringstream out;
     const auto         focusSurface = Desktop::focusState()->surface();
     const auto         focusWindow  = Desktop::focusState()->window();
 
     out << "focus_surface=" << (focusSurface ? "yes" : "no");
-    if (focusWindow)
+    if (focusWindow) {
+        const auto pid = focusWindow->getPID();
+        const auto cmdline = readProcCmdline(pid);
+
         out << " window_class=\"" << focusWindow->m_class << "\" title=\"" << focusWindow->m_title << "\"";
+        if (pid > 0)
+            out << " pid=" << pid;
+        if (isChromiumLikeCommand(cmdline)) {
+            out << " chromium_like=yes";
+            out << " enable_wayland_ime=" << (hasCmdlineFlag(cmdline, "--enable-wayland-ime") ? "yes" : "no");
+        }
+    }
 
     return out.str();
 }

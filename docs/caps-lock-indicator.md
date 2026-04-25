@@ -22,6 +22,7 @@ This feature no longer follows the mouse pointer. It follows the focused text ca
 - Native Wayland editors, terminals, and browser text fields are the target.
 - XWayland apps and any client that never sends a valid cursor rectangle are unsupported by design for this feature.
 - Browser UI is less stable than terminal/editor widgets because some browser surfaces stop reporting caret updates outside true editable fields.
+- Chromium and Electron-family apps may also need their Wayland IME path enabled before they publish usable text-input caret rectangles. If `/tmp/hyprmac_debug.log` shows `chromium_like=yes enable_wayland_ime=no`, the app launch command is a likely blocker rather than the compositor plugin itself.
 
 ## Debugging
 
