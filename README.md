@@ -1,0 +1,113 @@
+# hyprmac
+
+**macOS-like feel for Hyprland.**
+
+hyprmac is a Hyprland compositor plugin that brings the polished micro-interactions of macOS to your Wayland desktop. Rendered at the compositor level — not as floating windows or waybar widgets — so every effect works universally across all surfaces.
+
+---
+
+## Current features
+
+### Caps Lock indicator
+A small squircle badge appears just below your cursor tip whenever Caps Lock is active. Follows the cursor in real time, disappears instantly when you toggle Caps Lock off. Never miss a silent typo again.
+
+![Caps Lock indicator — blue squircle badge below cursor with upward arrow icon](.github/screenshot.png)
+
+---
+
+## Planned features
+
+- **Scroll momentum** — natural trackpad-style scroll deceleration
+- **Transcription indicator** — visual badge when a microphone is active
+- **Focus flash** — brief highlight ring when a window receives focus
+- **Smart zoom** — keyboard-driven zoom with smooth interpolation
+
+---
+
+## Requirements
+
+- Hyprland (see `hyprpm.toml` for pinned commits)
+- GCC 12+ (`g++`)
+- CMake 3.27+
+- `pangocairo`, `cairo`, `pixman`, `wayland-server`, `xkbcommon`, `libdrm`, `libinput` (all pulled in as Hyprland dependencies on most distros)
+
+---
+
+## Installation
+
+### Via hyprpm (recommended)
+
+```sh
+hyprpm add https://github.com/justinliang1020/hyprmac
+hyprpm enable hyprmac
+```
+
+After a Hyprland update, rebuild all plugins:
+
+```sh
+hyprpm update
+```
+
+### Manual build
+
+```sh
+git clone https://github.com/justinliang1020/hyprmac
+cd hyprmac
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+hyprctl plugin load "$(pwd)/build/libhyprmac.so"
+```
+
+To load on startup, add to `~/.config/hypr/hyprland.conf`:
+
+```
+exec-once = sleep 1 && hyprctl plugin load /path/to/hyprmac/build/libhyprmac.so
+```
+
+---
+
+## Configuration
+
+Add a `plugin:hyprmac` block to your `~/.config/hypr/hyprland.conf`:
+
+```ini
+plugin:hyprmac {
+    caps_lock_color    = rgba(3B82F6ff)  # badge fill color (default: Tailwind blue-500)
+    caps_lock_size     = 40              # badge diameter in logical pixels
+    caps_lock_offset_y = 8              # pixels below cursor hotspot
+}
+```
+
+### Config reference
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `caps_lock_color` | `rgba(RRGGBBAA)` | `rgba(3B82F6ff)` | Badge fill color |
+| `caps_lock_size` | integer (px) | `40` | Badge diameter in logical pixels |
+| `caps_lock_offset_y` | integer (px) | `8` | Vertical offset from cursor tip to badge top |
+
+Changes take effect immediately after `hyprctl reload` — no restart required.
+
+---
+
+## Unloading
+
+```sh
+hyprctl plugin unload /path/to/build/libhyprmac.so
+```
+
+---
+
+## Contributing
+
+hyprmac is designed to grow. Each macOS-feel feature lives in its own `src/features/<name>/` directory with a self-contained `init()` / `destroy()` pair wired into `main.cpp`. To add a new feature:
+
+1. Create `src/features/your_feature/YourFeature.{hpp,cpp}`
+2. Call `YourFeature::init()` from `PLUGIN_INIT` and `YourFeature::destroy()` from `PLUGIN_EXIT`
+3. Register any new config values before calling `init()`
+
+---
+
+## License
+
+MIT
