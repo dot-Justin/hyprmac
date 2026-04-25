@@ -759,14 +759,16 @@ static SCaretProbeResult probeCaretState() {
         };
     }
 
-    CTextInputV3* bestInput      = nullptr;
-    uint64_t      bestActivity   = 0;
-    size_t        directMatches  = 0;
-    size_t        updatedMatches = 0;
+    CTextInputV3* bestInput         = nullptr;
+    uint64_t      bestActivity      = 0;
+    size_t        directMatches     = 0;
+    size_t        updatedMatches    = 0;
+    size_t        enabledMatches    = 0;
+    size_t        updatedDisabled   = 0;
 
     for (auto& tracked : s_trackedTextInputsV3) {
         const auto input = tracked->input.lock();
-        if (!input || input->client() != focusSurface->client() || !input->m_current.enabled.value)
+        if (!input || input->client() != focusSurface->client())
             continue;
 
         directMatches++;
@@ -775,7 +777,14 @@ static SCaretProbeResult probeCaretState() {
             continue;
         updatedMatches++;
 
-        if (!bestInput || tracked->lastActivity >= bestActivity) {
+        if (input->m_current.enabled.value)
+            enabledMatches++;
+        else
+            updatedDisabled++;
+
+        if (!bestInput ||
+            (input->m_current.enabled.value && !bestInput->m_current.enabled.value) ||
+            (input->m_current.enabled.value == bestInput->m_current.enabled.value && tracked->lastActivity >= bestActivity)) {
             bestInput    = input.get();
             bestActivity = tracked->lastActivity;
         }
@@ -791,7 +800,9 @@ static SCaretProbeResult probeCaretState() {
                       " v1_matches=" + std::to_string(directMatchesV1) +
                       " v1_rect_matches=" + std::to_string(rectMatchesV1) +
                       " v3_matches=" + std::to_string(directMatches) +
-                      " v3_updated_matches=" + std::to_string(updatedMatches) + " " + focusSummary(),
+                      " v3_updated_matches=" + std::to_string(updatedMatches) +
+                      " v3_enabled_matches=" + std::to_string(enabledMatches) +
+                      " v3_updated_disabled=" + std::to_string(updatedDisabled) + " " + focusSummary(),
         };
 
     return {
