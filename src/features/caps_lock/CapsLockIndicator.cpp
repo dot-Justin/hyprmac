@@ -22,10 +22,10 @@ bool         CapsLockIndicator::s_textureDirty  = true;
 SP<CTexture> CapsLockIndicator::s_pillTexture;
 PHLMONITOR   CapsLockIndicator::s_currentMonitor;
 
-CHyprSignalListener CapsLockIndicator::s_renderPreListener;
-CHyprSignalListener CapsLockIndicator::s_renderStageListener;
-CHyprSignalListener CapsLockIndicator::s_keyboardKeyListener;
-CHyprSignalListener CapsLockIndicator::s_configReloadedListener;
+CHyprSignalListener              CapsLockIndicator::s_renderPreListener;
+CHyprSignalListener              CapsLockIndicator::s_renderStageListener;
+CHyprSignalListener              CapsLockIndicator::s_configReloadedListener;
+std::vector<CHyprSignalListener> CapsLockIndicator::s_kbModListeners;
 
 // ── Public ─────────────────────────────────────────────────────────────────
 
@@ -39,19 +39,28 @@ void CapsLockIndicator::init() {
     s_renderStageListener = Event::bus()->m_events.render.stage.listen(
         [](eRenderStage stage) { onRenderStage(stage); }
     );
-    s_keyboardKeyListener = Event::bus()->m_events.input.keyboard.key.listen(
-        [](IKeyboard::SKeyEvent ev, Event::SCallbackInfo& info) { onKeyboardKey(ev, info); }
-    );
     s_configReloadedListener = Event::bus()->m_events.config.reloaded.listen(
         []() { onConfigReloaded(); }
     );
+
+    // Caps Lock is a *locked* modifier in XKB. getModifiers() only returns
+    // depressed+latched, so we must hook each keyboard's modifiers signal,
+    // which fires after XKB has updated m_modifiersState.locked.
+    for (auto& kb : g_pInputManager->m_keyboards) {
+        if (!kb) continue;
+        s_kbModListeners.push_back(
+            kb->m_keyboardEvents.modifiers.listen(
+                [](const IKeyboard::SModifiersEvent& ev) { onKeyboardModifiers(ev); }
+            )
+        );
+    }
 }
 
 void CapsLockIndicator::destroy() {
     s_renderPreListener.reset();
     s_renderStageListener.reset();
-    s_keyboardKeyListener.reset();
     s_configReloadedListener.reset();
+    s_kbModListeners.clear();
     s_pillTexture.reset();
     s_textureDirty = true;
 }
@@ -107,11 +116,10 @@ void CapsLockIndicator::onRenderStage(eRenderStage stage) {
     g_pHyprOpenGL->renderTexture(s_pillTexture, pillBox, rd);
 }
 
-void CapsLockIndicator::onKeyboardKey(IKeyboard::SKeyEvent ev, Event::SCallbackInfo& info) {
-    if (!ev.updateMods)
-        return;
-
-    bool newState = isCapsLockActive();
+void CapsLockIndicator::onKeyboardModifiers(const IKeyboard::SModifiersEvent& ev) {
+    // Caps Lock lives in the *locked* modifier layer. This signal fires after
+    // XKB has updated m_modifiersState, so ev.locked reflects the new state.
+    bool newState = (ev.locked & HL_MODIFIER_CAPS) != 0;
     if (newState == s_capsActive)
         return;
 
@@ -128,8 +136,10 @@ void CapsLockIndicator::onConfigReloaded() {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 bool CapsLockIndicator::isCapsLockActive() {
+    // Caps Lock is a locked modifier — it lives in m_modifiersState.locked,
+    // not in the depressed/latched state that getModifiers() returns.
     for (auto& kb : g_pInputManager->m_keyboards) {
-        if (kb && (kb->getModifiers() & HL_MODIFIER_CAPS))
+        if (kb && (kb->m_modifiersState.locked & HL_MODIFIER_CAPS))
             return true;
     }
     return false;
