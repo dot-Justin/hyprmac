@@ -22,20 +22,19 @@
 // ── Static member definitions ──────────────────────────────────────────────
 
 bool         CapsLockIndicator::s_capsActive    = false;
-bool         CapsLockIndicator::s_textureDirty  = false;
-SP<CTexture> CapsLockIndicator::s_pillTexture   = nullptr;
+bool         CapsLockIndicator::s_textureDirty  = true;
+SP<CTexture> CapsLockIndicator::s_pillTexture;
 PHLMONITOR   CapsLockIndicator::s_currentMonitor;
 std::optional<CBox> CapsLockIndicator::s_lastGlobalPillBox;
-static bool  s_renderDebugShown = false;  // one-time debug flag
 
 namespace {
 
 class CCapsLockPassElement final : public IPassElement {
   public:
     struct SData {
+        SP<CTexture> tex;
         PHLMONITORREF monitor;
         CBox box;
-        CHyprColor bgColor;
     };
 
     explicit CCapsLockPassElement(SData&& data) : m_data(std::move(data)) {
@@ -46,42 +45,12 @@ class CCapsLockPassElement final : public IPassElement {
 
         const auto renderMonitor = g_pHyprOpenGL->m_renderData.pMonitor.lock();
         const auto expectedMonitor = m_data.monitor.lock();
-        if (!renderMonitor || !expectedMonitor || renderMonitor != expectedMonitor)
+        if (!m_data.tex || !renderMonitor || !expectedMonitor || renderMonitor != expectedMonitor)
             return;
 
-        const double size = m_data.box.w;
-        const double centerX = m_data.box.x + size / 2.0;
-        const int glyphRound = std::max(2, (int)std::round(size * 0.06));
-
-        g_pHyprOpenGL->renderRect(
-            m_data.box,
-            m_data.bgColor,
-            {.round = std::max(4, (int)std::round(size * 0.28))}
-        );
-
-        CBox stem{
-            centerX - size * 0.07,
-            m_data.box.y + size * 0.24,
-            size * 0.14,
-            size * 0.30
-        };
-        g_pHyprOpenGL->renderRect(stem, CHyprColor{1.0, 1.0, 1.0, 0.94}, {.round = glyphRound});
-
-        CBox cap{
-            centerX - size * 0.20,
-            m_data.box.y + size * 0.16,
-            size * 0.40,
-            size * 0.12
-        };
-        g_pHyprOpenGL->renderRect(cap, CHyprColor{1.0, 1.0, 1.0, 0.94}, {.round = glyphRound});
-
-        CBox bar{
-            centerX - size * 0.24,
-            m_data.box.y + size * 0.70,
-            size * 0.48,
-            size * 0.10
-        };
-        g_pHyprOpenGL->renderRect(bar, CHyprColor{1.0, 1.0, 1.0, 0.94}, {.round = glyphRound});
+        CHyprOpenGLImpl::STextureRenderData rd{};
+        rd.a = 1.0f;
+        g_pHyprOpenGL->renderTexture(m_data.tex, m_data.box, rd);
     }
 
     bool needsLiveBlur() override {
@@ -140,7 +109,7 @@ void CapsLockIndicator::init() {
     logDebug("=== hyprmac init ===");
 
     s_capsActive   = isCapsLockActive();
-    s_textureDirty = false;
+    s_textureDirty = true;
     s_lastGlobalPillBox.reset();
 
     logDebug("Initial Caps Lock state: " + std::string(s_capsActive ? "ON" : "OFF"));
@@ -178,7 +147,7 @@ void CapsLockIndicator::destroy() {
     s_keyboardFocusListener.reset();
     s_windowActiveListener.reset();
     s_pillTexture.reset();
-    s_textureDirty = false;
+    s_textureDirty = true;
     s_lastGlobalPillBox.reset();
 }
 
@@ -194,15 +163,19 @@ void CapsLockIndicator::onRenderStage(eRenderStage stage) {
     if (!s_capsActive)
         return;
 
-    // One-time debug: show that render stage is being called
-    if (!s_renderDebugShown) {
-        s_renderDebugShown = true;
-        logDebug("Render stage called with Caps Lock active");
-    }
-
     PHLMONITOR pMonitor = s_currentMonitor;
     if (!pMonitor)
         return;
+
+    if (s_textureDirty || !s_pillTexture) {
+        logDebug("Building texture");
+        buildTexture();
+        s_textureDirty = false;
+    }
+    if (!s_pillTexture) {
+        logDebug("Texture is null after build!");
+        return;
+    }
 
     const auto globalPillBox = pillBoxGlobal();
     if (!globalPillBox.has_value())
@@ -215,18 +188,10 @@ void CapsLockIndicator::onRenderStage(eRenderStage stage) {
     CBox pillBox = globalPillBox->copy().translate(-pMonitor->m_position);
     s_lastGlobalPillBox = globalPillBox;
 
-    logDebug("Queueing pill pass at logical (" + std::to_string(pillBox.x) + ", " + std::to_string(pillBox.y) + ")");
-
     CCapsLockPassElement::SData data;
+    data.tex = s_pillTexture;
     data.monitor = pMonitor;
     data.box = pillBox;
-    const int64_t colorRaw = (int64_t)configInt("plugin:hyprmac:caps_lock_color");
-    data.bgColor = CHyprColor{
-        (float)(((colorRaw >> 24) & 0xFF) / 255.0),
-        (float)(((colorRaw >> 16) & 0xFF) / 255.0),
-        (float)(((colorRaw >>  8) & 0xFF) / 255.0),
-        (float)(((colorRaw >>  0) & 0xFF) / 255.0)
-    };
 
     g_pHyprRenderer->m_renderPass.add(makeUnique<CCapsLockPassElement>(std::move(data)));
 }
@@ -235,14 +200,8 @@ void CapsLockIndicator::onKeyboardKey(IKeyboard::SKeyEvent ev, Event::SCallbackI
     const uint32_t CAPS_LOCK_KEYCODE = 58;
     (void)info;
 
-    logDebug("key event: keycode=" + std::to_string(ev.keycode) +
-             ", state=" + std::to_string(ev.state) +
-             ", updateMods=" + std::string(ev.updateMods ? "YES" : "NO"));
-
     // Check if this is Caps Lock (keycode 58) and it was pressed
     if (ev.keycode == CAPS_LOCK_KEYCODE && ev.state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-        logDebug("Caps Lock key pressed, toggling state...");
-
         s_capsActive = !s_capsActive;
         logDebug("Caps Lock toggled to " + std::string(s_capsActive ? "ON" : "OFF"));
         invalidateIndicator();
@@ -260,7 +219,7 @@ void CapsLockIndicator::onWindowActive(PHLWINDOW window) {
 }
 
 void CapsLockIndicator::onConfigReloaded() {
-    s_textureDirty = false;
+    s_textureDirty = true;
     s_pillTexture.reset();
     invalidateIndicator();
 }
@@ -424,7 +383,6 @@ void CapsLockIndicator::damageBox(const std::optional<CBox>& box) {
     if (!box.has_value())
         return;
 
-    logDebug("Damaging global pill box at (" + std::to_string(box->x) + ", " + std::to_string(box->y) + ")");
     g_pHyprRenderer->damageBox(box->copy().expand(4.0));
 }
 
