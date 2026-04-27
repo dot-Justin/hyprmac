@@ -83,9 +83,6 @@ float systemVolume(bool forceRefresh = false) {
 // ── Playback (audio thread only) ──────────────────────────────────────────
 
 void playSound() {
-    // The key event can arrive before the user-facing volume action updates
-    // PipeWire. Wait briefly, then force a fresh read of the sink volume.
-    std::this_thread::sleep_for(std::chrono::milliseconds(35));
     const float sysVol = systemVolume(true);
 
     if (sysVol < 0.01f)
@@ -147,9 +144,6 @@ int VolumeSound::configInt(const std::string& key) {
 void VolumeSound::onKey(IKeyboard::SKeyEvent ev, Event::SCallbackInfo& info) {
     (void)info;
 
-    if (ev.state != WL_KEYBOARD_KEY_STATE_PRESSED)
-        return;
-
     // KEY_VOLUMEUP = 115, KEY_VOLUMEDOWN = 114 (Linux evdev)
     if (ev.keycode != 115 && ev.keycode != 114)
         return;
@@ -157,7 +151,11 @@ void VolumeSound::onKey(IKeyboard::SKeyEvent ev, Event::SCallbackInfo& info) {
     if (!configInt("plugin:hyprmac:volume_sound_enabled"))
         return;
 
-    // Signal audio thread — non-blocking, never touches PipeWire on main thread
+    if (ev.state != WL_KEYBOARD_KEY_STATE_RELEASED)
+        return;
+
+    // Match macOS behavior: adjust silently while the key is held, then play
+    // one click on release at the final volume level.
     const char sig = 1;
     write(s_pipeWrite, &sig, 1);
 }
