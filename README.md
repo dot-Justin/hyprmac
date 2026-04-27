@@ -40,7 +40,16 @@ A small squircle badge appears just below the focused text caret whenever Caps L
 ```sh
 hyprpm add https://github.com/justinliang1020/hyprmac
 hyprpm enable hyprmac
+hyprpm reload
 ```
+
+`hyprpm enable` only marks the plugin as enabled. Hyprland loads enabled plugins on startup when your config runs:
+
+```ini
+exec-once = hyprpm reload
+```
+
+Add that line to `~/.config/hypr/hyprland.conf` or a sourced override file such as `~/.config/hypr/userprefs.conf`.
 
 After a Hyprland update, rebuild all plugins:
 
@@ -58,11 +67,13 @@ cmake --build build
 hyprctl plugin load "$(pwd)/build/libhyprmac.so"
 ```
 
-To load on startup, add to `~/.config/hypr/hyprland.conf`:
+To load a manual build on startup, add to `~/.config/hypr/hyprland.conf` or a sourced override file such as `~/.config/hypr/userprefs.conf`:
 
+```ini
+exec-once = hyprctl plugin load /absolute/path/to/hyprmac/build/libhyprmac.so
 ```
-exec-once = sleep 1 && hyprctl plugin load /path/to/hyprmac/build/libhyprmac.so
-```
+
+Use an absolute path. `plugin:hyprmac { ... }` config only sets plugin options; it does not load the plugin by itself.
 
 ---
 
