@@ -1,6 +1,7 @@
 #include "globals.hpp"
 #include "src/features/caps_lock/CapsLockIndicator.hpp"
 #include "src/features/volume_sound/VolumeSound.hpp"
+#include "src/features/volume/VolumeController.hpp"
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/version.h>
@@ -49,8 +50,20 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprmac:volume_sound_enabled",
                                 Hyprlang::INT{1});
 
+    // Volume OSD
+    HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprmac:volume_osd_enabled",
+                                Hyprlang::INT{1});
+    HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprmac:osd_blur_enabled",
+                                Hyprlang::INT{1});
+    HyprlandAPI::addConfigValue(PHANDLE, "plugin:hyprmac:osd_bg_color",
+                                Hyprlang::INT{(int64_t)0x1A1A1AB2});
+
+    HyprlandAPI::addDispatcherV2(PHANDLE, "hyprmac:volume",
+        [](std::string args) { return VolumeController::dispatch(args); });
+
     CapsLockIndicator::init();
     VolumeSound::init();
+    VolumeController::init();
 
     HyprlandAPI::addNotification(PHANDLE, "[hyprmac] Loaded v0.1.0",
                                  CHyprColor{0.2, 0.8, 0.2, 1.0}, 3000);
@@ -59,6 +72,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
+    VolumeController::destroy();
     VolumeSound::destroy();
     CapsLockIndicator::destroy();
 }
